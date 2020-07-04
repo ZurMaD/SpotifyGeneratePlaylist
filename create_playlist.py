@@ -7,6 +7,7 @@ import googleapiclient.errors
 import requests
 import youtube_dl
 
+from exceptions import ResponseException
 from secrets import spotify_token, spotify_user_id
 
 
@@ -27,42 +28,65 @@ class CreatePlaylist:
 
         # Get credentials and create an API client
         scopes = ["https://www.googleapis.com/auth/youtube.readonly"]
-        flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file(client_secrets_file, scopes)
+        flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file(
+            client_secrets_file, scopes)
         credentials = flow.run_console()
 
         # from the Youtube DATA API
-        youtube_client = googleapiclient.discovery.build(api_service_name, api_version, credentials=credentials)
+        youtube_client = googleapiclient.discovery.build(
+            api_service_name, api_version, credentials=credentials)
 
         return youtube_client
 
     def get_liked_videos(self):
-        """Grab Our Liked Videos & Creating A Dictionary Of Important Song Information"""
+        """Grab Our Liked Videos & Create A Dictionary Of Important Song Information"""
         request = self.youtube_client.videos().list(
             part="snippet,contentDetails,statistics",
             myRating="like"
         )
         response = request.execute()
 
+        ydl_opts = {
+        'format': 'bestaudio/best',
+        'noplaylist': True,
+        'continue_dl': True,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'wav',
+            'preferredquality': '192', }]
+    }
+
         # collect each video and get important information
         for item in response["items"]:
             video_title = item["snippet"]["title"]
-            youtube_url = "https://www.youtube.com/watch?v={}".format(item["id"])
+            youtube_url = "https://www.youtube.com/watch?v={}".format(
+                item["id"])
 
+            # try:
+            #     with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+            #         ydl.cache.remove()
+            #         info_dict = ydl.extract_info(youtube_url, download=False)
+            #         # ydl.prepare_filename(info_dict)
+            #         # ydl.download([youtube_url])
+                    
+            # except Exception as e:
+            #     print(e) 
+            song_name = item["snippet"]["title"][:10]
+            artist = item["snippet"]["channelTitle"]
             # use youtube_dl to collect the song name & artist name
-            video = youtube_dl.YoutubeDL({}).extract_info(youtube_url, download=False)
-            song_name = video["track"]
-            artist = video["artist"]
-
-            # save all important info
-            self.all_song_info[video_title]={
-                "youtube_url": youtube_url,
-                "song_name": song_name,
-                "artist": artist,
-
-                # add the uri, easy to get song to put into playlist
-                "spotify_uri":self.get_spotify_uri(song_name,artist)
-
-            }
+            # video = youtube_dl.YoutubeDL({}).extract_info(
+            #     youtube_url, download=False)
+            print("MUSICA: ",song_name,artist)
+            if song_name is not None and artist is not None:
+                # save all important info and skip any missing song and artist
+                self.all_song_info[video_title] = {
+                    "youtube_url": youtube_url,
+                    "song_name": song_name,
+                    "artist": artist,
+                    # add the uri, easy to get song to put into playlist
+                    "spotify_uri": self.get_spotify_uri(song_name, artist)
+                }
+    
 
     def create_playlist(self):
         """Create A New Playlist"""
@@ -72,7 +96,8 @@ class CreatePlaylist:
             "public": True
         })
 
-        query = "https://api.spotify.com/v1/users/{}/playlists".format(spotify_user_id)
+        query = "https://api.spotify.com/v1/users/{}/playlists".format(
+            spotify_user_id)
         response = requests.post(
             query,
             data=request_body,
@@ -88,10 +113,11 @@ class CreatePlaylist:
 
     def get_spotify_uri(self, song_name, artist):
         """Search For the Song"""
-        query = "https://api.spotify.com/v1/search?query=track%3A{}+artist%3A{}&type=track&offset=0&limit=20".format(
-            song_name,
-            artist
-        )
+        query="https://api.spotify.com/v1/search?q={}&type=track".format(song_name)
+        # query = "https://api.spotify.com/v1/search?query=track%3A{}+artist%3A{}&type=track&offset=0&limit=20".format(
+        #     song_name,
+        #     artist
+        # )
         response = requests.get(
             query,
             headers={
@@ -101,27 +127,31 @@ class CreatePlaylist:
         )
         response_json = response.json()
         songs = response_json["tracks"]["items"]
-
+        try:
         # only use the first song
-        uri = songs[0]["uri"]
+            uri = songs[0]["uri"]
+            
+            return uri
+        except Exception:            
+            pass
 
-        return uri
 
     def add_song_to_playlist(self):
-        """Add this song into the new Spotify playlist"""
+        """Add all liked songs into a new Spotify playlist"""
         # populate dictionary with our liked songs
         self.get_liked_videos()
 
         # collect all of uri
-        uris = [info["spotify_uri"] for song, info in self.all_song_info.items()]
+        uris = [info["spotify_uri"]
+                for song, info in self.all_song_info.items()]
 
         # create a new playlist
         playlist_id = self.create_playlist()
 
         # add all songs into new playlist
         request_data = json.dumps(uris)
-
-        query = "https://api.spotify.com/v1/playlists/{}/tracks".format(playlist_id)
+        query = "https://api.spotify.com/v1/playlists/{}/tracks".format(
+            playlist_id)
 
         response = requests.post(
             query,
@@ -131,8 +161,15 @@ class CreatePlaylist:
                 "Authorization": "Bearer {}".format(spotify_token)
             }
         )
-        response_json = response.json()
-        return response_json
+        try:
+        # check for valid response status
+            if response.status_code != 200:
+                raise ResponseException(response.status_code)
+
+            response_json = response.json()
+            return response_json
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
